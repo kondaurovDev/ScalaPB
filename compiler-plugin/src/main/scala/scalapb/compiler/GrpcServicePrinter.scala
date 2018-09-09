@@ -18,7 +18,7 @@ final class GrpcServicePrinter(service: ServiceDescriptor, implicits: Descriptor
   }
 
   def getScalaOut(method: MethodDescriptor): String = {
-    getSealedName(method.getInputType).getOrElse(method.scalaOut)
+    getSealedName(method.getOutputType).getOrElse(method.scalaOut)
   }
 
   private[this] def serviceMethodSignature(method: MethodDescriptor) = {
@@ -113,36 +113,25 @@ final class GrpcServicePrinter(service: ServiceDescriptor, implicits: Descriptor
         case StreamType.Unary =>
           if (blocking) {
             val signature = "override " + blockingMethodSignature(m) + " = {"
-            if (!m.getOutputType.isSealedOneofType) {
-              p.add(
-                signature,
-                s"""  $clientCalls.blockingUnaryCall(channel.newCall(${m.descriptorName}, options), request)""",
-                "}"
-              )
-            } else {
-              p.add(
-                signature,
-                s"""  $clientCalls.blockingUnaryCall(channel.newCall(${m.descriptorName}, options), request.asMessage).to${m.getOutputType.sealedOneofName}""",
-                "}"
-              )
-            }
+            val request = if (m.getInputType.isSealedOneofType) "request.asMessage" else "request"
+            val afterBrackets = if (m.getOutputType.isSealedOneofType) s".to${m.getOutputType.sealedOneofName}" else ""
+            p.add(
+              signature,
+              s"""  $clientCalls.blockingUnaryCall(channel.newCall(${m.descriptorName}, options), $request)$afterBrackets""",
+              "}"
+            )
           } else {
             val signature =  "override " + serviceMethodSignature(m) + " = {"
-            if (m.getOutputType.isSealedOneofType) {
-              p.add(
-                signature,
-                s"""  val f = $guavaFuture2ScalaFuture($clientCalls.futureUnaryCall(channel.newCall(${m.descriptorName}, options), request.asMessage))""",
-                s"  ${ if (!m.getOutputType.isSealedOneofType) "f" else s"f.map(_.to${m.getOutputType.sealedOneofName})(concurrent.ExecutionContext.fromExecutor(options.getExecutor))"} ",
-                "}"
-              )
-            } else {
-              p.add(
-                signature,
-                s"""  $guavaFuture2ScalaFuture($clientCalls.futureUnaryCall(channel.newCall(${m.descriptorName}, options), request))""",
-                "}"
-              )
-            }
+            val afterRequest = if (m.getInputType.isSealedOneofType) ".asMessage" else ""
+            val mapF = s"f.map(_.to${m.getOutputType.sealedOneofName})(concurrent.ExecutionContext.fromExecutor(options.getExecutor))"
+            p.add(
+              signature,
+              s"""  val f = $guavaFuture2ScalaFuture($clientCalls.futureUnaryCall(channel.newCall(${m.descriptorName}, options), request$afterRequest))""",
+              s"  ${ if (!m.getOutputType.isSealedOneofType) "f" else mapF}",
+              "}"
+            )
           }
+
         case StreamType.ServerStreaming =>
           if (blocking) {
             p.add(
@@ -274,21 +263,14 @@ final class GrpcServicePrinter(service: ServiceDescriptor, implicits: Descriptor
         method.streamType match {
           case StreamType.Unary =>
             val serverMethod = s"$serverCalls.UnaryMethod[${method.scalaIn}, ${method.scalaOut}]"
+            val afterRequest = if (method.getInputType.isSealedOneofType) s".to${method.getInputType.sealedOneofName}" else ""
+            val afterT = if (method.getOutputType.isSealedOneofType) ".map(_.asMessage)" else ""
 
-            if (method.getOutputType.isSealedOneofType) {
-              p.addStringMargin(s"""$call(new $serverMethod {
-               |  override def invoke(request: ${method.scalaIn}, observer: $streamObserver[${method.scalaOut}]): Unit =
-               |    $serviceImpl.${method.name}(request.to${method.getInputType.sealedOneofName}).onComplete(t => scalapb.grpc.Grpc.completeObserver(observer)(t.map(_.asMessage)))(
-               |      $executionContext)
-               |}))""")
-            } else {
-              p.addStringMargin(s"""$call(new $serverMethod {
-               |  override def invoke(request: ${method.scalaIn}, observer: $streamObserver[${method.scalaOut}]): Unit =
-               |    $serviceImpl.${method.name}(request).onComplete(t => scalapb.grpc.Grpc.completeObserver(observer)(t))(
-               |      $executionContext)
-               |}))""")
-
-            }
+            p.addStringMargin(s"""$call(new $serverMethod {
+             |  override def invoke(request: ${method.scalaIn}, observer: $streamObserver[${method.scalaOut}]): Unit =
+             |    $serviceImpl.${method.name}(request$afterRequest).onComplete(t => scalapb.grpc.Grpc.completeObserver(observer)(t$afterT))(
+             |      $executionContext)
+             |}))""")
 
           case StreamType.ServerStreaming =>
             val serverMethod =
