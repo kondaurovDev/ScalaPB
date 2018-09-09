@@ -106,6 +106,7 @@ final class GrpcServicePrinter(service: ServiceDescriptor, implicits: Descriptor
   private[this] val clientCalls = "_root_.io.grpc.stub.ClientCalls"
 
   private[this] val guavaFuture2ScalaFuture = "scalapb.grpc.Grpc.guavaFuture2ScalaFuture"
+  private[this] val observerMap = "scalapb.grpc.Grpc.observerMap"
 
   private[this] def clientMethodImpl(m: MethodDescriptor, blocking: Boolean) =
     PrinterEndo { p =>
@@ -123,7 +124,7 @@ final class GrpcServicePrinter(service: ServiceDescriptor, implicits: Descriptor
           } else {
             val signature =  "override " + serviceMethodSignature(m) + " = {"
             val afterRequest = if (m.getInputType.isSealedOneofType) ".asMessage" else ""
-            val mapF = s"f.map(_.to${m.getOutputType.sealedOneofName})(concurrent.ExecutionContext.fromExecutor(options.getExecutor))"
+            def mapF = s"f.map(_.to${m.getOutputType.sealedOneofName})(concurrent.ExecutionContext.fromExecutor(options.getExecutor))"
             p.add(
               signature,
               s"""  val f = $guavaFuture2ScalaFuture($clientCalls.futureUnaryCall(channel.newCall(${m.descriptorName}, options), request$afterRequest))""",
@@ -133,40 +134,98 @@ final class GrpcServicePrinter(service: ServiceDescriptor, implicits: Descriptor
           }
 
         case StreamType.ServerStreaming =>
+
           if (blocking) {
+            val afterBrackets = if (m.getOutputType.isSealedOneofType) s".map(_.to${m.getOutputType.sealedOneofName})" else ""
             p.add(
                 "override " + blockingMethodSignature(m) + " = {"
               )
               .addIndented(
-                s"scala.collection.JavaConverters.asScalaIteratorConverter($clientCalls.blockingServerStreamingCall(channel.newCall(${m.descriptorName}, options), request)).asScala"
+                s"scala.collection.JavaConverters.asScalaIteratorConverter($clientCalls.blockingServerStreamingCall(channel.newCall(${m.descriptorName}, options), request)).asScala$afterBrackets"
               )
               .add("}")
           } else {
-            p.add(
-                "override " + serviceMethodSignature(m) + " = {"
-              )
-              .addIndented(
-                s"$clientCalls.asyncServerStreamingCall(channel.newCall(${m.descriptorName}, options), request, responseObserver)"
-              )
-              .add("}")
-          }
-        case streamType =>
-          require(!blocking)
-          val call = if (streamType == StreamType.ClientStreaming) {
-            s"$clientCalls.asyncClientStreamingCall"
-          } else {
-            s"$clientCalls.asyncBidiStreamingCall"
+            val signature = "override " + serviceMethodSignature(m) + " = {"
+            if (m.getOutputType.isSealedOneofType) {
+              p.add(signature)
+                .addIndented(
+                  s"val obs = $observerMap[${getScalaOut(m)}, ${m.scalaOut}](responseObserver, (m) => m.to${m.getOutputType.sealedOneofName} )",
+                  s"$clientCalls.asyncServerStreamingCall(channel.newCall(${m.descriptorName}, options), request, obs)"
+                )
+                .add("}")
+            } else {
+              p.add(signature)
+                .addIndented(
+                  s"$clientCalls.asyncServerStreamingCall(channel.newCall(${m.descriptorName}, options), request, responseObserver)"
+                )
+                .add("}")
+            }
+
           }
 
-          p.add(
-              "override " + serviceMethodSignature(m) + " = {"
-            )
-            .indent
-            .add(
-              s"$call(channel.newCall(${m.descriptorName}, options), responseObserver)"
-            )
-            .outdent
-            .add("}")
+        case StreamType.ClientStreaming =>
+
+          require(!blocking, s"Method '${m.getFullName}' can't be blocking because it is used in streaming")
+          val call = s"$clientCalls.asyncClientStreamingCall"
+
+          if (m.getInputType.isSealedOneofType) {
+            p.add("override " + serviceMethodSignature(m) + " = {")
+              .addIndented(
+                s"{11}; val obs = $observerMap[${m.scalaIn}, ${getScalaIn(m)}](responseObserver, (m) => m.asMessage )",
+                s"$call(channel.newCall(${m.descriptorName}, options), obs)"
+              )
+              .add("}")
+          } else if (m.getOutputType.isSealedOneofType)  {
+            p.add("override " + serviceMethodSignature(m) + " = {")
+              .addIndented(
+                s"{22}; val obs = $observerMap[${m.scalaIn}, ${getScalaIn(m)}](responseObserver, (m) => m.asMessage )",
+                s"$call(channel.newCall(${m.descriptorName}, options), obs)"
+              )
+              .add("}")
+          } else {
+            p.add("override " + serviceMethodSignature(m) + " = {")
+              .addIndented(
+                s"{33}; $call(channel.newCall(${m.descriptorName}, options), responseObserver)"
+              )
+              .add("}")
+          }
+
+        case StreamType.Bidirectional =>
+
+          require(!blocking, s"Method '${m.getFullName}' can't be blocking because it is used in streaming")
+          val call = s"$clientCalls.asyncBidiStreamingCall"
+
+          if (m.getInputType.isSealedOneofType) {
+            p.add("override " + serviceMethodSignature(m) + " = {")
+              .addIndented(
+                "{1};",
+                s"val obs = $call(channel.newCall(${m.descriptorName}, options), responseObserver)",
+                s"$observerMap[${m.scalaIn}, ${getScalaIn(m)}](obs, (m) => m.asMessage )",
+                s""
+              )
+              .add("}")
+          } else if (m.getOutputType.isSealedOneofType)  {
+            p.add("override " + serviceMethodSignature(m) + " = {")
+              .addIndented(
+                s"{2}; val obs = $observerMap[${m.scalaIn}, ${getScalaIn(m)}](responseObserver, (m) => m.asMessage )",
+                s"$call(channel.newCall(${m.descriptorName}, options), obs)"
+              )
+              .add("}")
+          } else {
+            p.add("override " + serviceMethodSignature(m) + " = {")
+              .addIndented(
+                s"{3}; $call(channel.newCall(${m.descriptorName}, options), responseObserver)"
+              )
+              .add("}")
+          }
+
+/*
+      val obs = _root_.io.grpc.stub.ClientCalls.asyncBidiStreamingCall(channel.newCall(METHOD_PROCESS_DATA_STREAM, options), responseObserver)
+      scalapb.grpc.Grpc.observerMap[data_clean.data_processor.response.ResponseMessage, data_clean.data_processor.response.Response](obs, (m) => m.asMessage )
+
+ */
+
+
       }
     } andThen PrinterEndo { _.newline }
 
@@ -275,21 +334,93 @@ final class GrpcServicePrinter(service: ServiceDescriptor, implicits: Descriptor
           case StreamType.ServerStreaming =>
             val serverMethod =
               s"$serverCalls.ServerStreamingMethod[${method.scalaIn}, ${method.scalaOut}]"
-            p.addStringMargin(s"""$call(new $serverMethod {
-            |  override def invoke(request: ${method.scalaIn}, observer: $streamObserver[${method.scalaOut}]): Unit =
-            |    $serviceImpl.${method.name}(request, observer)
-            |}))""")
-          case _ =>
-            val serverMethod = if (method.streamType == StreamType.ClientStreaming) {
-              s"$serverCalls.ClientStreamingMethod[${method.scalaIn}, ${method.scalaOut}]"
+
+            if (method.getOutputType.isSealedOneofType) {
+
+              p.addStringMargin(s"""$call(new $serverMethod {
+               |  override def invoke(request: ${method.scalaIn}, observer: $streamObserver[${method.scalaOut}]): Unit = {
+               |   val obs = $observerMap[${method.scalaOut}, ${getScalaOut(method)}](observer, (m) => m.asMessage )
+               |   $serviceImpl.${method.name}(request, obs)
+               |  }
+               |}))""")
+
+            } else if (method.getInputType.isSealedOneofType) {
+
+              p.addStringMargin(s"""$call(new $serverMethod {
+               |  override def invoke(request: ${method.scalaIn}, observer: $streamObserver[${method.scalaOut}]): Unit = {
+               |   {} val obs = $observerMap[${method.scalaOut}, ${getScalaOut(method)}](observer, (m) => m.asMessage )
+               |   $serviceImpl.${method.name}(request, obs)
+               |  }
+               |}))""")
+
             } else {
-              s"$serverCalls.BidiStreamingMethod[${method.scalaIn}, ${method.scalaOut}]"
+
+              p.addStringMargin(s"""$call(new $serverMethod {
+               |  override def invoke(request: ${method.scalaIn}, observer: $streamObserver[${method.scalaOut}]): Unit = {
+               |   $serviceImpl.${method.name}(request, observer)
+               |  }
+               |}))""")
+
+
             }
+
+          case StreamType.ClientStreaming =>
+
+            val serverMethod = s"$serverCalls.ClientStreamingMethod[${method.scalaIn}, ${method.scalaOut}]"
+
             p.addStringMargin(s"""$call(new $serverMethod {
-            |  override def invoke(observer: $streamObserver[${method.scalaOut}]): $streamObserver[${method.scalaIn}] =
-            |    $serviceImpl.${method.name}(observer)
+             |  override def invoke(observer: $streamObserver[${method.scalaOut}]): $streamObserver[${method.scalaIn}] = {
+             |   val obs = $observerMap[${method.scalaOut}, ${getScalaOut(method)}](observer, (m) => m.asMessage )
+             |   $serviceImpl.${method.name}(obs)
+             |  }
+             |
             |}))""")
+
+          case StreamType.Bidirectional =>
+
+            val serverMethod = s"$serverCalls.BidiStreamingMethod[${method.scalaIn}, ${method.scalaOut}]"
+
+            /*
+                    override def invoke(observer: _root_.io.grpc.stub.StreamObserver[data_clean.data_processor.response2.Response2Message]): _root_.io.grpc.stub.StreamObserver[data_clean.data_processor.response.ResponseMessage] = {
+          val obs = scalapb.grpc.Grpc.observerMap[data_clean.data_processor.response2.Response2Message, data_clean.data_processor.response2.Response2](obs, (m) => m.asMessage )
+          val obs2 = serviceImpl.processDataStream(obs)
+          scalapb.grpc.Grpc.observerMap[data_clean.data_processor.response.Response, data_clean.data_processor.response.ResponseMessage](obs2, (v) => v.toResponse)
+
+             */
+
+            if (method.getOutputType.isSealedOneofType) {
+              p.addStringMargin(s"""$call(new $serverMethod {
+               |  {111};
+               |  override def invoke(observer: $streamObserver[${method.scalaOut}]): $streamObserver[${method.scalaIn}] = {
+               |   val obs = $observerMap[${method.scalaOut}, ${getScalaOut(method)}](observer, (m) => m.asMessage )
+               |   val obs2 = $serviceImpl.${method.name}(obs)
+               |   $observerMap[${getScalaIn(method)}, ${method.scalaIn}](obs2, (m) => m.to${method.getInputType.sealedOneofName} )
+               |  }
+               |
+              |}))""")
+
+            } else if (method.getInputType.isSealedOneofType) {
+              p.addStringMargin(s"""$call(new $serverMethod {
+               |  {222};
+               |  override def invoke(observer: $streamObserver[${method.scalaOut}]): $streamObserver[${method.scalaIn}] = {
+               |   val obs = $serviceImpl.${method.name}(observer)
+               |   $observerMap[${getScalaIn(method)}, ${method.scalaIn}](obs, (m) => m.to${method.getInputType.sealedOneofName} )
+               |  }
+               |
+            |}))""")
+            } else {
+              p.addStringMargin(s"""$call(new $serverMethod {
+               |  {333};
+               |
+               |  override def invoke(observer: $streamObserver[${method.scalaOut}]): $streamObserver[${method.scalaIn}] = {
+               |   $serviceImpl.${method.name}(observer)
+               |  }
+               |
+               |}))""")
+            }
+
         }
+
       })
       .outdent
   }

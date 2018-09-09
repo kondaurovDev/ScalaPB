@@ -436,7 +436,7 @@ class DescriptorImplicits(params: GeneratorParams, files: Seq[FileDescriptor]) {
     def nameSymbol = scalaName.asSymbol
 
     def sealedOneofName = {
-      require(isSealedOneofType)
+      require(isSealedOneofType, "Not a sealedOneOfType")
       scalaName.stripSuffix(OneofMessageSuffix).asSymbol
     }
 

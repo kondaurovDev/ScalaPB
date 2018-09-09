@@ -33,4 +33,17 @@ object Grpc {
           Status.INTERNAL.withDescription(e.getMessage).withCause(e).asException()
         )
     }
+
+  def observerMap[A1, A2](observer: StreamObserver[A1], map: A2 => A1): StreamObserver[A2] = {
+
+    new StreamObserver[A2] {
+      override def onNext(value: A2): Unit = observer.onNext(map(value))
+
+      override def onError(t: Throwable): Unit = observer.onError(t)
+
+      override def onCompleted(): Unit = observer.onCompleted()
+    }
+
+  }
+
 }
