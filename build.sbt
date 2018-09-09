@@ -171,7 +171,7 @@ lazy val compilerPlugin = project.in(file("compiler-plugin"))
       IO.write(file,
         s"""package scalapb.compiler
            |object Version {
-           |  val scalapbVersion = "${version.value}"
+           |  val scalapbVersion = "0.8.0-RC1"
            |  val protobufVersion = "${protobufVersion}"
            |  val grpcJavaVersion = "${grpcVersion}"
            |}""".stripMargin)
