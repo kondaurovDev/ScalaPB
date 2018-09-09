@@ -112,21 +112,36 @@ final class GrpcServicePrinter(service: ServiceDescriptor, implicits: Descriptor
       m.streamType match {
         case StreamType.Unary =>
           if (blocking) {
-            p.add(
-                "override " + blockingMethodSignature(m) + " = {"
-              )
-              .add(
+            val signature = "override " + blockingMethodSignature(m) + " = {"
+            if (!m.getOutputType.isSealedOneofType) {
+              p.add(
+                signature,
                 s"""  $clientCalls.blockingUnaryCall(channel.newCall(${m.descriptorName}, options), request)""",
                 "}"
               )
-          } else {
-            p.add(
-                "override " + serviceMethodSignature(m) + " = {"
+            } else {
+              p.add(
+                signature,
+                s"""  $clientCalls.blockingUnaryCall(channel.newCall(${m.descriptorName}, options), request.asMessage).to${m.getOutputType.sealedOneofName}""",
+                "}"
               )
-              .add(
+            }
+          } else {
+            val signature =  "override " + serviceMethodSignature(m) + " = {"
+            if (m.getOutputType.isSealedOneofType) {
+              p.add(
+                signature,
+                s"""  val f = $guavaFuture2ScalaFuture($clientCalls.futureUnaryCall(channel.newCall(${m.descriptorName}, options), request.asMessage))""",
+                s"  ${ if (!m.getOutputType.isSealedOneofType) "f" else s"f.map(_.to${m.getOutputType.sealedOneofName})(concurrent.ExecutionContext.fromExecutor(options.getExecutor))"} ",
+                "}"
+              )
+            } else {
+              p.add(
+                signature,
                 s"""  $guavaFuture2ScalaFuture($clientCalls.futureUnaryCall(channel.newCall(${m.descriptorName}, options), request))""",
                 "}"
               )
+            }
           }
         case StreamType.ServerStreaming =>
           if (blocking) {
@@ -256,32 +271,40 @@ final class GrpcServicePrinter(service: ServiceDescriptor, implicits: Descriptor
         val executionContext = "executionContext"
         val serviceImpl      = "serviceImpl"
 
-        val in = getScalaIn(method)
-        val out = getScalaOut(method)
-
         method.streamType match {
           case StreamType.Unary =>
-            val serverMethod = s"$serverCalls.UnaryMethod[$in, $out]"
-            p.addStringMargin(s"""$call(new $serverMethod {
-            |  override def invoke(request: $in, observer: $streamObserver[$out]): Unit =
-            |    $serviceImpl.${method.name}(request).onComplete(scalapb.grpc.Grpc.completeObserver(observer))(
-            |      $executionContext)
-            |}))""")
+            val serverMethod = s"$serverCalls.UnaryMethod[${method.scalaIn}, ${method.scalaOut}]"
+
+            if (method.getOutputType.isSealedOneofType) {
+              p.addStringMargin(s"""$call(new $serverMethod {
+               |  override def invoke(request: ${method.scalaIn}, observer: $streamObserver[${method.scalaOut}]): Unit =
+               |    $serviceImpl.${method.name}(request.to${method.getInputType.sealedOneofName}).onComplete(t => scalapb.grpc.Grpc.completeObserver(observer)(t.map(_.asMessage)))(
+               |      $executionContext)
+               |}))""")
+            } else {
+              p.addStringMargin(s"""$call(new $serverMethod {
+               |  override def invoke(request: ${method.scalaIn}, observer: $streamObserver[${method.scalaOut}]): Unit =
+               |    $serviceImpl.${method.name}(request).onComplete(t => scalapb.grpc.Grpc.completeObserver(observer)(t))(
+               |      $executionContext)
+               |}))""")
+
+            }
+
           case StreamType.ServerStreaming =>
             val serverMethod =
-              s"$serverCalls.ServerStreamingMethod[$in, $out]"
+              s"$serverCalls.ServerStreamingMethod[${method.scalaIn}, ${method.scalaOut}]"
             p.addStringMargin(s"""$call(new $serverMethod {
-            |  override def invoke(request: $in, observer: $streamObserver[$out]): Unit =
+            |  override def invoke(request: ${method.scalaIn}, observer: $streamObserver[${method.scalaOut}]): Unit =
             |    $serviceImpl.${method.name}(request, observer)
             |}))""")
           case _ =>
             val serverMethod = if (method.streamType == StreamType.ClientStreaming) {
-              s"$serverCalls.ClientStreamingMethod[$in, $out]"
+              s"$serverCalls.ClientStreamingMethod[${method.scalaIn}, ${method.scalaOut}]"
             } else {
-              s"$serverCalls.BidiStreamingMethod[$in, $out]"
+              s"$serverCalls.BidiStreamingMethod[${method.scalaIn}, ${method.scalaOut}]"
             }
             p.addStringMargin(s"""$call(new $serverMethod {
-            |  override def invoke(observer: $streamObserver[$out]): $streamObserver[$in] =
+            |  override def invoke(observer: $streamObserver[${method.scalaOut}]): $streamObserver[${method.scalaIn}] =
             |    $serviceImpl.${method.name}(observer)
             |}))""")
         }
